@@ -1,0 +1,103 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: clone-build-push
+  namespace: quarkus-app
+spec:
+  description: | 
+    This pipeline clones a git repo, builds a Docker image with Kaniko and
+    pushes it to a registry
+  params:
+    - name: IMAGE_REPO
+      type: string
+    - name: GIT_REPO
+      type: string
+    - name: GIT_REVISION
+      type: string
+    - name: GIT_REPO_NAME
+      type: string
+    - name: GIT_REPO_FULL_NAME
+      type: string
+  tasks:
+    - name: fetch-source
+      params:
+        - name: url
+          value: $(params.GIT_REPO)
+        - name: revision
+          value: $(params.GIT_REVISION)
+        - name: deleteExisting
+          value: 'true'
+        - name: sslVerify
+          value: 'false'
+      taskRef:
+        kind: Task
+        name: git-clone
+      workspaces:
+        - name: output
+          workspace: tekton-pvc
+    - name: s2i
+      params:
+        - name: VERSION
+          value: latest
+        - name: PATH_CONTEXT
+          value: .
+        - name: TLSVERIFY
+          value: 'true'
+        - name: IMAGE
+          value: '$(params.IMAGE_REPO)/$(params.GIT_REPO_NAME):$(params.GIT_REVISION)'
+        - name: BUILDER_IMAGE
+          value: 'registry.access.redhat.com/ubi8/python-38:latest'
+      runAfter:
+        - fetch-source
+      taskRef:
+        kind: Task
+        name: s2i
+      workspaces:
+        - name: source
+          workspace: tekton-pvc
+        - name: dockerconfig
+          workspace: dockerconfig
+    - name: sign-image
+      params:
+        - name: image
+          value: '$(params.IMAGE_REPO)/$(params.GIT_REPO_NAME):$(params.GIT_REVISION)'
+      runAfter:
+        - s2i
+      taskRef:
+        kind: Task
+        name: cosign
+    - name: image-check
+      runAfter:
+        - sign-image
+      taskRef:
+        name: stackrox-image-check
+        kind: Task
+      params:
+        - name: image
+          value: '$(params.IMAGE_REPO)/$(params.GIT_REPO_NAME)@$(tasks.s2i.results.IMAGE_DIGEST)'
+        - name: rox_api_token
+          value: rox-api-token
+        - name: rox_central_endpoint
+          value: rox-api-token
+        - name: insecure-skip-tls-verify
+          value: "true"
+    - name: image-scan
+      runAfter:
+        - sign-image
+      taskRef:
+        name: stackrox-image-scan
+        kind: Task
+      params:
+        - name: image
+          value: '$(params.IMAGE_REPO)/$(params.GIT_REPO_NAME)@$(tasks.s2i.results.IMAGE_DIGEST)'
+        - name: rox_api_token
+          value: rox-api-token
+        - name: rox_central_endpoint
+          value: rox-api-token
+        - name: insecure-skip-tls-verify
+          value: "true"
+        - name: output_format
+          value: csv
+  workspaces:
+    - name: tekton-pvc
+    - name: dockerconfig
